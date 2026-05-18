@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use tokio::sync::{Mutex, mpsc};
 
 use super::read;
-use crate::connection::payload::Payload;
+use crate::payload::Payload;
 
 struct Listener {
     event_rx: Mutex<mpsc::UnboundedReceiver<()>>,

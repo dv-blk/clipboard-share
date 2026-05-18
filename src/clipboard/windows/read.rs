@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use arboard::Clipboard;
 
-use crate::connection::payload::Payload;
+use crate::payload::Payload;
 
 struct ArboardClipboard(Mutex<Clipboard>);
 

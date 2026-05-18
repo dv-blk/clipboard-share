@@ -11,10 +11,6 @@ pub struct EchoGuard {
 }
 
 impl EchoGuard {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Record the fingerprint of content just written from the peer.
     pub fn record(&self, fp: Vec<u8>) {
         *self.last_written_fp.lock().unwrap() = Some(fp);
@@ -38,27 +34,27 @@ mod tests {
 
     #[test]
     fn no_echo_when_empty() {
-        let guard = EchoGuard::new();
+        let guard = EchoGuard::default();
         assert!(!guard.is_echo(b"anything"));
     }
 
     #[test]
     fn echo_detected_after_record() {
-        let guard = EchoGuard::new();
+        let guard = EchoGuard::default();
         guard.record(b"hello".to_vec());
         assert!(guard.is_echo(b"hello"));
     }
 
     #[test]
     fn different_fp_not_echo() {
-        let guard = EchoGuard::new();
+        let guard = EchoGuard::default();
         guard.record(b"hello".to_vec());
         assert!(!guard.is_echo(b"world"));
     }
 
     #[test]
     fn record_overwrites_previous() {
-        let guard = EchoGuard::new();
+        let guard = EchoGuard::default();
         guard.record(b"first".to_vec());
         guard.record(b"second".to_vec());
         assert!(!guard.is_echo(b"first"));
@@ -67,7 +63,7 @@ mod tests {
 
     #[test]
     fn clone_shares_state() {
-        let guard = EchoGuard::new();
+        let guard = EchoGuard::default();
         let clone = guard.clone();
         guard.record(b"shared".to_vec());
         assert!(clone.is_echo(b"shared"));

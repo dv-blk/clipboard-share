@@ -1,16 +1,16 @@
 mod read;
-mod wait;
+mod changed;
 mod write;
 
 use crate::clipboard::Clipboard;
-use crate::connection::payload::Payload;
+use crate::payload::Payload;
 
 #[derive(Clone, Default)]
 pub struct WindowsClipboard;
 
 impl Clipboard for WindowsClipboard {
-    fn wait(&self) -> impl std::future::Future<Output = anyhow::Result<Option<Payload>>> + Send {
-        wait::clipboard_wait()
+    fn changed(&self) -> impl std::future::Future<Output = anyhow::Result<Option<Payload>>> + Send {
+        changed::clipboard_wait()
     }
 
     fn write(

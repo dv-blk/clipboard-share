@@ -1,4 +1,4 @@
-use crate::connection::payload::Payload;
+use crate::payload::Payload;
 
 #[cfg(target_os = "linux")]
 mod wayland;
@@ -7,7 +7,7 @@ mod wayland;
 mod windows;
 
 pub trait Clipboard: Clone + Send + Sync + 'static {
-    fn wait(&self) -> impl std::future::Future<Output = anyhow::Result<Option<Payload>>> + Send;
+    fn changed(&self) -> impl std::future::Future<Output = anyhow::Result<Option<Payload>>> + Send;
     fn write(
         &self,
         payload: Payload,
