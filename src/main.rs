@@ -1,19 +1,29 @@
+#![warn(rust_2018_idioms)]
+#![deny(unused_must_use)]
+
 mod clipboard;
-mod clipboard_monitor;
-mod config;
-mod container;
+mod connection;
 mod echo_guard;
-mod message;
-mod sync_engine;
-mod transport;
+
+use std::{net::SocketAddr, time::Duration};
 
 use clap::Parser;
-use config::Config;
-use std::net::SocketAddr;
+use tokio::sync::watch;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use clipboard::{Clipboard, PlatformClipboard};
+use connection::{
+    Connection, ConnectionEvent, Peer,
+    payload::{Payload, fingerprint},
+};
+use echo_guard::EchoGuard;
+
 #[derive(Parser, Debug)]
-#[command(name = "clipboard-share", about = "Bidirectional clipboard sync over TCP")]
+#[command(
+    name = "clipboard-share",
+    about = "Bidirectional clipboard sync over TCP"
+)]
 struct Cli {
     /// Local address to listen on.
     #[arg(long, default_value = "0.0.0.0:9876")]
@@ -32,17 +42,318 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("clipboard_share=info".parse()?),
+            EnvFilter::from_default_env().add_directive("clipboard_share=info".parse()?),
         )
         .init();
 
-    let cli = Cli::parse();
-    let config = Config {
-        listen: cli.listen,
-        peer: cli.peer,
-        reconnect_delay_ms: cli.reconnect_delay_ms,
-    };
+    run(Cli::parse()).await
+}
 
-    container::run(config).await
+async fn run(cli: Cli) -> anyhow::Result<()> {
+    let mut conn = Connection::open(
+        cli.listen,
+        cli.peer,
+        Duration::from_millis(cli.reconnect_delay_ms),
+    );
+
+    info!("initialized");
+
+    let engine = Sync::new(PlatformClipboard::default(), EchoGuard::new());
+    engine.run(&mut conn).await
+}
+
+struct Sync<C: Clipboard> {
+    clipboard: C,
+    echo_guard: EchoGuard,
+}
+
+impl<C: Clipboard> Sync<C> {
+    fn new(clipboard: C, echo_guard: EchoGuard) -> Self {
+        Self {
+            clipboard,
+            echo_guard,
+        }
+    }
+
+    async fn run(&self, conn: &mut impl Peer) -> anyhow::Result<()> {
+        let clipboard = self.clipboard.clone();
+        let echo_guard = self.echo_guard.clone();
+        let (content_tx, mut content_rx) = watch::channel(None);
+
+        tokio::spawn(async move {
+            info!("clipboard monitor started");
+            let mut last_fp: Option<Vec<u8>> = None;
+
+            loop {
+                match clipboard.wait().await {
+                    Ok(Some(msg)) => {
+                        let fp = fingerprint(&msg);
+                        if echo_guard.is_echo(&fp) {
+                            debug!("clipboard monitor: suppressing echo");
+                        } else if last_fp.as_deref() == Some(fp.as_slice()) {
+                            debug!("clipboard monitor: content unchanged, skipping");
+                        } else {
+                            info!("clipboard monitor: new content detected, publishing");
+                            last_fp = Some(fp);
+                            let _ = content_tx.send(Some(msg));
+                        }
+                    }
+                    Ok(None) => {
+                        debug!("clipboard monitor: selection event with no supported content");
+                    }
+                    Err(e) => {
+                        error!("clipboard monitor error: {e}");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        });
+
+        content_rx.mark_unchanged();
+
+        loop {
+            tokio::select! {
+                event = conn.next_event() => {
+                    match event {
+                        Some(ConnectionEvent::Message(Payload::Heartbeat)) => {
+                            debug!("sync engine: heartbeat received");
+                        }
+                        Some(ConnectionEvent::Message(msg)) => {
+                            let fp = fingerprint(&msg);
+                            match self.clipboard.write(msg).await {
+                                Err(e) => error!("sync engine: failed to write clipboard: {e}"),
+                                Ok(_) => {
+                                    self.echo_guard.record(fp);
+                                    info!("sync engine: clipboard updated from peer");
+                                }
+                            }
+                        }
+                        Some(ConnectionEvent::Reconnected) => {
+                            info!("sync engine: connected to peer");
+                            let msg = content_rx.borrow().clone();
+                            if let Some(msg) = msg {
+                                debug!("sync engine: flushing clipboard to new peer");
+                                if let Err(e) = conn.send(msg).await {
+                                    warn!("sync engine: flush send error: {e}");
+                                }
+                            }
+                        }
+                        Some(ConnectionEvent::Disconnected) => {
+                            warn!("sync engine: disconnected from peer");
+                        }
+                        None => {
+                            warn!("sync engine: connection loop closed, stopping");
+                            break;
+                        }
+                    }
+                }
+                result = content_rx.changed() => {
+                    if result.is_err() {
+                        warn!("sync engine: clipboard monitor channel closed, stopping");
+                        break;
+                    }
+                    let msg = content_rx.borrow_and_update().clone();
+                    let Some(msg) = msg else { continue };
+                    debug!("sync engine: clipboard changed, sending to peer");
+                    match conn.send(msg).await {
+                        Err(e) => warn!("sync engine: send error: {e}"),
+                        Ok(_) => info!("sync engine: sent clipboard update to peer"),
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tokio::sync::{Notify, mpsc};
+
+    use crate::Sync;
+    use crate::clipboard::Clipboard;
+    use crate::connection::{
+        ConnectionEvent, Peer,
+        payload::{Payload, fingerprint},
+    };
+    use crate::echo_guard::EchoGuard;
+
+    #[derive(Default)]
+    struct MockClipboardInner {
+        contents: Mutex<Option<Payload>>,
+        notify: Notify,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockClipboard {
+        inner: Arc<MockClipboardInner>,
+    }
+
+    impl MockClipboard {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn set(&self, msg: Payload) {
+            *self.inner.contents.lock().unwrap() = Some(msg);
+            self.inner.notify.notify_waiters();
+        }
+
+        fn get(&self) -> Option<Payload> {
+            self.inner.contents.lock().unwrap().clone()
+        }
+    }
+
+    impl Clipboard for MockClipboard {
+        async fn wait(&self) -> anyhow::Result<Option<Payload>> {
+            self.inner.notify.notified().await;
+            Ok(self.inner.contents.lock().unwrap().clone())
+        }
+
+        async fn write(&self, msg: Payload) -> anyhow::Result<()> {
+            *self.inner.contents.lock().unwrap() = Some(msg);
+            self.inner.notify.notify_waiters();
+            Ok(())
+        }
+    }
+
+    struct MockConnection {
+        event_tx: mpsc::Sender<ConnectionEvent>,
+        msg_rx: mpsc::Receiver<Payload>,
+        event_rx: mpsc::Receiver<ConnectionEvent>,
+        msg_tx: mpsc::Sender<Payload>,
+    }
+
+    impl MockConnection {
+        fn new() -> Self {
+            let (event_tx, event_rx) = mpsc::channel(64);
+            let (msg_tx, msg_rx) = mpsc::channel(64);
+            Self {
+                event_tx,
+                event_rx,
+                msg_tx,
+                msg_rx,
+            }
+        }
+    }
+
+    impl Peer for MockConnection {
+        async fn send(&self, payload: Payload) -> anyhow::Result<()> {
+            self.msg_tx
+                .send(payload)
+                .await
+                .map_err(|_| anyhow::anyhow!("mock connection closed"))
+        }
+
+        async fn next_event(&mut self) -> Option<ConnectionEvent> {
+            self.event_rx.recv().await
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_clipboard_change_to_peer() {
+        let mut conn = MockConnection::new();
+        let clipboard = MockClipboard::new();
+        let clipboard_set = clipboard.clone();
+        let _writer = MockClipboard::new();
+
+        conn.event_tx
+            .send(ConnectionEvent::Reconnected)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            clipboard_set.set(Payload::Text("hello".to_string()));
+        });
+
+        let engine = Sync::new(clipboard, EchoGuard::new());
+        tokio::select! {
+            _ = engine.run(&mut conn) => {}
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+
+        let msg = conn.msg_rx.try_recv().expect("expected a message");
+        assert_eq!(msg, Payload::Text("hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn writes_incoming_message_to_clipboard() {
+        let mut conn = MockConnection::new();
+        let writer = MockClipboard::new();
+        let writer_check = writer.clone();
+
+        conn.event_tx
+            .send(ConnectionEvent::Message(Payload::Text(
+                "from peer".to_string(),
+            )))
+            .await
+            .unwrap();
+
+        let engine = Sync::new(writer, EchoGuard::new());
+        tokio::select! {
+            _ = engine.run(&mut conn) => {}
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+
+        assert_eq!(
+            writer_check.get(),
+            Some(Payload::Text("from peer".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn echo_guard_recorded_after_receive() {
+        let mut conn = MockConnection::new();
+        let echo_guard = EchoGuard::new();
+        let echo_check = echo_guard.clone();
+
+        let writer = MockClipboard::new();
+        let msg = Payload::Text("peer content".to_string());
+        let expected_fp = fingerprint(&msg);
+        conn.event_tx
+            .send(ConnectionEvent::Message(msg))
+            .await
+            .unwrap();
+
+        let engine = Sync::new(writer, echo_guard);
+        tokio::select! {
+            _ = engine.run(&mut conn) => {}
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+
+        assert!(
+            echo_check.is_echo(&expected_fp),
+            "echo guard should record the received fingerprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn echo_suppressed_after_peer_write() {
+        let mut conn = MockConnection::new();
+        let clipboard = MockClipboard::new();
+        let msg = Payload::Text("from peer".to_string());
+
+        // Deliver a message from the peer.
+        conn.event_tx
+            .send(ConnectionEvent::Message(msg))
+            .await
+            .unwrap();
+
+        let engine = Sync::new(clipboard, EchoGuard::new());
+        tokio::select! {
+            _ = engine.run(&mut conn) => {}
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+
+        // The clipboard monitor will have woken up with the same content that
+        // was just written, but echo_guard.is_echo() should suppress it.
+        assert!(
+            conn.msg_rx.try_recv().is_err(),
+            "echo should be suppressed: peer content must not be sent back"
+        );
+    }
 }

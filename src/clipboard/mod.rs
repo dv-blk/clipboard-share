@@ -1,30 +1,25 @@
-pub mod mock;
+use crate::connection::payload::Payload;
 
 #[cfg(target_os = "linux")]
-pub mod wayland;
+mod wayland;
 
 #[cfg(target_os = "windows")]
-pub mod windows;
+mod windows;
 
-use crate::message::ClipboardMessage;
-use async_trait::async_trait;
-
-/// Abstraction over clipboard write (and optional read). Used by `SyncEngine`
-/// to write incoming peer content to the local clipboard.
-#[async_trait]
-pub trait ClipboardProvider: Send + Sync {
-    async fn read(&mut self) -> anyhow::Result<Option<ClipboardMessage>>;
-    async fn write(&mut self, msg: &ClipboardMessage) -> anyhow::Result<()>;
+pub trait Clipboard: Clone + Send + Sync + 'static {
+    fn wait(&self) -> impl std::future::Future<Output = anyhow::Result<Option<Payload>>> + Send;
+    fn write(
+        &self,
+        payload: Payload,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 
-/// Allow a boxed trait object to itself satisfy `ClipboardProvider`.
-#[async_trait]
-impl ClipboardProvider for Box<dyn ClipboardProvider> {
-    async fn read(&mut self) -> anyhow::Result<Option<ClipboardMessage>> {
-        (**self).read().await
-    }
+#[cfg(target_os = "linux")]
+pub use wayland::WaylandClipboard;
+#[cfg(target_os = "linux")]
+pub type PlatformClipboard = WaylandClipboard;
 
-    async fn write(&mut self, msg: &ClipboardMessage) -> anyhow::Result<()> {
-        (**self).write(msg).await
-    }
-}
+#[cfg(target_os = "windows")]
+pub use windows::WindowsClipboard;
+#[cfg(target_os = "windows")]
+pub type PlatformClipboard = WindowsClipboard;
