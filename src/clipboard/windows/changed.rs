@@ -24,7 +24,12 @@ fn listener() -> &'static Listener {
 /// Block until the clipboard changes, then return the new contents.
 pub async fn clipboard_wait() -> anyhow::Result<Option<Payload>> {
     match listener().event_rx.lock().await.recv().await {
-        Some(()) => read::read().await,
+        Some(()) => {
+            // Brief delay to allow the source application to fulfil delayed
+            // rendering before we attempt to read the clipboard data.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            read::read().await
+        }
         None => Err(anyhow::anyhow!(
             "Win32 clipboard listener thread exited unexpectedly"
         )),

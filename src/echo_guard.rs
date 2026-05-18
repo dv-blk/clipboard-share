@@ -16,15 +16,16 @@ impl EchoGuard {
         *self.last_written_fp.lock().unwrap() = Some(fp);
     }
 
-    /// Returns `true` if `fp` matches the last peer-written fingerprint.
-    /// The monitor should suppress publishing when this returns `true`.
+    /// Returns `true` if `fp` matches the last peer-written fingerprint,
+    /// and clears the record so future copies of the same content are not suppressed.
     pub fn is_echo(&self, fp: &[u8]) -> bool {
-        self.last_written_fp
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(|last| last == fp)
-            .unwrap_or(false)
+        let mut guard = self.last_written_fp.lock().unwrap();
+        if guard.as_deref() == Some(fp) {
+            *guard = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -43,6 +44,14 @@ mod tests {
         let guard = EchoGuard::default();
         guard.record(b"hello".to_vec());
         assert!(guard.is_echo(b"hello"));
+    }
+
+    #[test]
+    fn echo_consumed_after_match() {
+        let guard = EchoGuard::default();
+        guard.record(b"hello".to_vec());
+        assert!(guard.is_echo(b"hello"));
+        assert!(!guard.is_echo(b"hello")); // second check — should no longer match
     }
 
     #[test]

@@ -1,5 +1,5 @@
-mod read;
 mod changed;
+mod read;
 mod write;
 
 use crate::clipboard::Clipboard;
