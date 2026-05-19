@@ -8,22 +8,19 @@ use crate::payload::Payload;
 
 pub async fn write(msg: Payload) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
-        match &msg {
+        match msg {
             Payload::Text(text) => {
                 let opts = Options::new();
-                opts.copy(
-                    Source::Bytes(text.as_bytes().to_vec().into()),
-                    CopyMimeType::Text,
-                )?;
+                opts.copy(Source::Bytes(text.into_bytes().into()), CopyMimeType::Text)?;
             }
             Payload::Image {
                 width,
                 height,
                 rgba,
             } => {
-                let img = RgbaImage::from_raw(*width, *height, rgba.clone())
+                let img = RgbaImage::from_raw(width, height, rgba)
                     .ok_or_else(|| anyhow::anyhow!("invalid image dimensions"))?;
-                let mut png_bytes: Vec<u8> = Vec::new();
+                let mut png_bytes = Vec::new();
                 img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)?;
                 let opts = Options::new();
                 opts.copy(

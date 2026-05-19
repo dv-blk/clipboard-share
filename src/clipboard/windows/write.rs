@@ -7,9 +7,9 @@ use crate::payload::Payload;
 pub async fn write(msg: Payload) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         let mut cb = Clipboard::new()?;
-        match &msg {
+        match msg {
             Payload::Text(text) => {
-                cb.set_text(text.clone())?;
+                cb.set_text(text)?;
             }
             Payload::Image {
                 width,
@@ -17,9 +17,9 @@ pub async fn write(msg: Payload) -> anyhow::Result<()> {
                 rgba,
             } => {
                 let img = ImageData {
-                    width: *width as usize,
-                    height: *height as usize,
-                    bytes: Cow::Borrowed(rgba),
+                    width: width as usize,
+                    height: height as usize,
+                    bytes: Cow::Owned(rgba),
                 };
                 cb.set_image(img)?;
             }

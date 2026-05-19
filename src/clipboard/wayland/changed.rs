@@ -20,9 +20,9 @@ pub async fn changed() -> anyhow::Result<Option<Payload>> {
         Ok(has_text || has_image)
     })
     .await
-    .context("clipboard wait task panicked")?;
+    .context("clipboard wait task panicked")??;
 
-    if has_content? {
+    if has_content {
         read::read().await
     } else {
         Ok(None)

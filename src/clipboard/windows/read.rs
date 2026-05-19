@@ -1,4 +1,4 @@
-use arboard::Clipboard;
+use arboard::{Clipboard, Error as ArboardError};
 
 use crate::payload::Payload;
 
@@ -8,7 +8,8 @@ pub async fn read() -> anyhow::Result<Option<Payload>> {
         let mut cb = Clipboard::new()?;
         match cb.get_text() {
             Ok(text) if !text.is_empty() => return Ok(Some(Payload::Text(text))),
-            _ => {}
+            Ok(_) | Err(ArboardError::ContentNotAvailable) => {}
+            Err(e) => return Err(e.into()),
         }
         match cb.get_image() {
             Ok(img) => {
@@ -18,7 +19,8 @@ pub async fn read() -> anyhow::Result<Option<Payload>> {
                     rgba: img.bytes.into_owned(),
                 }));
             }
-            _ => {}
+            Err(ArboardError::ContentNotAvailable) => {}
+            Err(e) => return Err(e.into()),
         }
         Ok(None)
     })

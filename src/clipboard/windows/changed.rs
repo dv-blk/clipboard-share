@@ -81,11 +81,10 @@ fn win32_clipboard_listener(event_tx: mpsc::UnboundedSender<()>) {
             None,
         );
 
-        if hwnd.is_err() {
+        let Ok(hwnd) = hwnd else {
             tracing::error!("failed to create clipboard listener window");
             return;
-        }
-        let hwnd = hwnd.unwrap();
+        };
 
         if AddClipboardFormatListener(hwnd).is_err() {
             tracing::error!("AddClipboardFormatListener failed");
@@ -125,9 +124,9 @@ unsafe extern "system" fn wnd_proc(
             windows::Win32::Foundation::LRESULT(0)
         }
         WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
+            PostQuitMessage(0);
             windows::Win32::Foundation::LRESULT(0)
         }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
