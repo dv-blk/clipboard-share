@@ -1,10 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-};
+use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::payload::Payload;
@@ -22,8 +18,11 @@ pub enum ConnectionEvent {
 /// Abstraction over a peer connection, allowing `Sync` to be tested
 /// without a real TCP stack.
 pub trait Peer {
-    async fn send(&self, payload: Payload) -> anyhow::Result<()>;
-    async fn recv(&mut self) -> Option<ConnectionEvent>;
+    fn send(
+        &self,
+        payload: Payload,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    fn recv(&mut self) -> impl std::future::Future<Output = Option<ConnectionEvent>> + Send;
 }
 
 /// A live peer connection. Drives a background reconnect loop and exposes
@@ -109,7 +108,10 @@ impl Peer for Connection {
 }
 
 async fn connect(listen: SocketAddr, peer: SocketAddr) -> anyhow::Result<TcpStream> {
-    let listener = TcpListener::bind(listen).await?;
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(listen)?;
+    let listener = socket.listen(128)?;
     info!("listening on {listen}");
     tokio::select! {
         result = listener.accept() => {

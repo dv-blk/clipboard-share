@@ -15,21 +15,34 @@ pub struct Sync<C: Clipboard> {
 }
 
 impl<C: Clipboard> Sync<C> {
-    pub async fn run(&self, mut conn: impl Peer) -> anyhow::Result<()> {
+    pub async fn run<P: Peer + Send + 'static>(&self, peers: Vec<P>) -> anyhow::Result<()> {
+        let (content_tx, content_rx) = watch::channel(None);
+        self.watch_clipboard(content_tx);
+
+        let mut set = tokio::task::JoinSet::new();
+
+        for (i, peer) in peers.into_iter().enumerate() {
+            self.sync_peer(&mut set, i, peer, content_rx.clone());
+        }
+
+        set.join_all().await;
+
+        Ok(())
+    }
+
+    fn watch_clipboard(&self, content_tx: watch::Sender<Option<Payload>>) {
         let clipboard = self.clipboard.clone();
         let echo_guard = self.echo_guard.clone();
-        let (content_tx, mut content_rx) = watch::channel(None);
-
         tokio::spawn(async move {
             info!("clipboard monitor started");
             let mut last_fp: Option<Vec<u8>> = None;
-
             loop {
                 match clipboard.changed().await {
                     Ok(Some(msg)) => {
                         let fp = msg.fingerprint();
                         if echo_guard.is_echo(&fp) {
                             debug!("clipboard monitor: suppressing echo");
+                            last_fp = Some(fp);
                         } else if last_fp.as_deref() == Some(fp.as_slice()) {
                             debug!("clipboard monitor: content unchanged, skipping");
                         } else {
@@ -48,59 +61,66 @@ impl<C: Clipboard> Sync<C> {
                 }
             }
         });
+    }
 
+    fn sync_peer<P: Peer + Send + 'static>(
+        &self,
+        set: &mut tokio::task::JoinSet<()>,
+        i: usize,
+        peer: P,
+        mut content_rx: watch::Receiver<Option<Payload>>,
+    ) {
+        let clipboard = self.clipboard.clone();
+        let echo_guard = self.echo_guard.clone();
         content_rx.mark_unchanged();
-
-        loop {
-            tokio::select! {
-                event = conn.recv() => {
-                    match event {
-                        Some(ConnectionEvent::Message(Payload::Heartbeat)) => {
-                            debug!("sync engine: heartbeat received");
-                        }
-                        Some(ConnectionEvent::Message(msg)) => {
-                            let fp = msg.fingerprint();
-                            match self.clipboard.write(msg).await {
-                                Err(e) => error!("sync engine: failed to write clipboard: {e}"),
-                                Ok(_) => {
-                                    self.echo_guard.record(fp);
-                                    info!("sync engine: clipboard updated from peer");
+        set.spawn(async move {
+            let mut peer = peer;
+            loop {
+                tokio::select! {
+                    event = peer.recv() => {
+                        match event {
+                            Some(ConnectionEvent::Message(Payload::Heartbeat)) => {
+                                debug!("peer {i}: heartbeat received");
+                            }
+                            Some(ConnectionEvent::Message(msg)) => {
+                                let fp = msg.fingerprint();
+                                match clipboard.write(msg).await {
+                                    Err(e) => error!("peer {i}: failed to write clipboard: {e}"),
+                                    Ok(()) => {
+                                        echo_guard.record(fp);
+                                        info!("peer {i}: clipboard updated from peer");
+                                    }
                                 }
                             }
-                        }
-                        Some(ConnectionEvent::Reconnected) => {
-                            info!("sync engine: connected to peer");
-                            if let Some(msg) = content_rx.borrow().clone() {
-                                debug!("sync engine: flushing clipboard to new peer");
-                                if let Err(e) = conn.send(msg).await {
-                                    warn!("sync engine: flush send error: {e}");
+                            Some(ConnectionEvent::Reconnected) => {
+                                info!("peer {i}: connected");
+                                let msg = content_rx.borrow().clone();
+                                if let Some(msg) = msg {
+                                    debug!("peer {i}: flushing clipboard on reconnect");
+                                    if let Err(e) = peer.send(msg).await {
+                                        warn!("peer {i}: flush error: {e}");
+                                    }
                                 }
                             }
-                        }
-                        Some(ConnectionEvent::Disconnected) => {
-                            warn!("sync engine: disconnected from peer");
-                        }
-                        None => {
-                            warn!("sync engine: connection loop closed, stopping");
-                            break;
+                            Some(ConnectionEvent::Disconnected) => {
+                                warn!("peer {i}: disconnected");
+                            }
+                            None => {
+                                warn!("peer {i}: connection loop closed");
+                                return;
+                            }
                         }
                     }
-                }
-                result = content_rx.changed() => {
-                    let Ok(()) = result else {
-                        warn!("sync engine: clipboard monitor channel closed, stopping");
-                        break;
-                    };
-                    let Some(msg) = content_rx.borrow_and_update().clone() else { continue };
-                    debug!("sync engine: clipboard changed, sending to peer");
-                    match conn.send(msg).await {
-                        Err(e) => warn!("sync engine: send error: {e}"),
-                        Ok(_) => info!("sync engine: sent clipboard update to peer"),
+                    result = content_rx.changed() => {
+                        let Ok(()) = result else { return };
+                        let Some(msg) = content_rx.borrow_and_update().clone() else { continue };
+                        debug!("peer {i}: clipboard changed, sending");
+                        if let Err(e) = peer.send(msg).await {
+                            warn!("peer {i}: send error: {e}");
+                        }
                     }
                 }
             }
-        }
-
-        Ok(())
+        });
     }
 }

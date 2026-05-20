@@ -124,9 +124,9 @@ unsafe extern "system" fn wnd_proc(
             windows::Win32::Foundation::LRESULT(0)
         }
         WM_DESTROY => {
-            PostQuitMessage(0);
+            unsafe { PostQuitMessage(0) };
             windows::Win32::Foundation::LRESULT(0)
         }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }

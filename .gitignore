@@ -1,1 +1,12 @@
 /target
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/*.iml
+android/.idea/
+android/gradlew
+android/gradlew.bat
+android/gradle/

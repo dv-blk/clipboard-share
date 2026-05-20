@@ -27,9 +27,9 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:9876")]
     listen: SocketAddr,
 
-    /// Peer address to connect to.
-    #[arg(long)]
-    peer: SocketAddr,
+    /// Peer address(es) to connect to. Repeat to add more peers.
+    #[arg(long = "peer", num_args = 1..)]
+    peers: Vec<SocketAddr>,
 
     /// Delay between reconnect attempts in milliseconds.
     #[arg(long, default_value_t = 4000)]
@@ -49,15 +49,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let conn = Connection::open(
-        cli.listen,
-        cli.peer,
-        Duration::from_millis(cli.reconnect_delay_ms),
-    );
+    let reconnect_delay = Duration::from_millis(cli.reconnect_delay_ms);
+
+    let peers = cli
+        .peers
+        .into_iter()
+        .map(|peer| Connection::open(cli.listen, peer, reconnect_delay))
+        .collect();
 
     info!("initialized");
 
-    Sync::<PlatformClipboard>::default().run(conn).await
+    Sync::<PlatformClipboard>::default().run(peers).await
 }
 
 #[cfg(test)]
@@ -166,7 +168,7 @@ mod tests {
             echo_guard: EchoGuard::default(),
         };
         tokio::select! {
-            _ = engine.run(conn) => {}
+            _ = engine.run(vec![conn]) => {}
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}
         }
 
@@ -193,7 +195,7 @@ mod tests {
             ..Sync::default()
         };
         tokio::select! {
-            _ = engine.run(conn) => {}
+            _ = engine.run(vec![conn]) => {}
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}
         }
 
@@ -204,59 +206,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_guard_recorded_after_receive() {
-        let (conn, handle) = MockConnection::new();
-        let echo_guard = EchoGuard::default();
-        let echo_check = echo_guard.clone();
-
-        let writer = MockClipboard::new();
-        let msg = Payload::Text("peer content".to_string());
-        let expected_fp = msg.fingerprint();
-        handle
-            .event_tx
-            .send(ConnectionEvent::Message(msg))
-            .await
-            .unwrap();
-
-        let engine = Sync {
-            clipboard: writer,
-            echo_guard,
-        };
-        tokio::select! {
-            _ = engine.run(conn) => {}
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
-        }
-
-        assert!(
-            echo_check.is_echo(&expected_fp),
-            "echo guard should record the received fingerprint"
-        );
-    }
-
-    #[tokio::test]
-    async fn echo_suppressed_after_peer_write() {
+    async fn echo_guard_prevents_resend_to_source() {
+        // After receiving content from a peer, the clipboard monitor fires
+        // (because we wrote locally). The echo guard must suppress that send
+        // back to the peer — so the peer gets no messages back.
         let (conn, mut handle) = MockConnection::new();
         let clipboard = MockClipboard::new();
-        let msg = Payload::Text("from peer".to_string());
+        let clipboard_trigger = clipboard.clone();
+
+        let msg = Payload::Text("peer content".to_string());
 
         handle
             .event_tx
-            .send(ConnectionEvent::Message(msg))
+            .send(ConnectionEvent::Message(msg.clone()))
             .await
             .unwrap();
+
+        // Simulate OS clipboard notification with the same content shortly after.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            clipboard_trigger.set(msg);
+        });
 
         let engine = Sync {
             clipboard,
             echo_guard: EchoGuard::default(),
         };
         tokio::select! {
-            _ = engine.run(conn) => {}
+            _ = engine.run(vec![conn]) => {}
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}
         }
 
+        // The peer must not receive its own content back.
         assert!(
             handle.msg_rx.try_recv().is_err(),
-            "echo should be suppressed: peer content must not be sent back"
+            "echo guard must suppress sending peer content back to its source"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_peers_receive_clipboard_change() {
+        let (conn0, mut handle0) = MockConnection::new();
+        let (conn1, mut handle1) = MockConnection::new();
+        let clipboard = MockClipboard::new();
+        let clipboard_set = clipboard.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            clipboard_set.set(Payload::Text("broadcast".to_string()));
+        });
+
+        let engine = Sync {
+            clipboard,
+            echo_guard: EchoGuard::default(),
+        };
+        tokio::select! {
+            _ = engine.run(vec![conn0, conn1]) => {}
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+
+        assert_eq!(
+            handle0.msg_rx.try_recv().unwrap(),
+            Payload::Text("broadcast".to_string())
+        );
+        assert_eq!(
+            handle1.msg_rx.try_recv().unwrap(),
+            Payload::Text("broadcast".to_string())
         );
     }
 }
