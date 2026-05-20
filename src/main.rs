@@ -1,5 +1,6 @@
 #![warn(rust_2018_idioms)]
 #![deny(unused_must_use)]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod clipboard;
 mod connection;
