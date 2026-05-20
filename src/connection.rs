@@ -1,9 +1,22 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+};
 use tracing::{debug, error, info, warn};
 
 use crate::payload::Payload;
+
+pub fn bind_listener(listen: SocketAddr) -> anyhow::Result<Arc<TcpListener>> {
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(listen)?;
+    let listener = socket.listen(128)?;
+    info!("listening on {listen}");
+    Ok(Arc::new(listener))
+}
 
 /// Events produced by the connection loop and consumed by `Sync`.
 pub enum ConnectionEvent {
@@ -33,14 +46,14 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn open(listen: SocketAddr, peer: SocketAddr, reconnect_delay: Duration) -> Self {
+    pub fn open(listener: Arc<TcpListener>, peer: SocketAddr, reconnect_delay: Duration) -> Self {
         let (msg_tx, mut msg_rx) = mpsc::channel::<Payload>(64);
         let (event_tx, event_rx) = mpsc::channel::<ConnectionEvent>(64);
 
         tokio::spawn(async move {
             loop {
                 info!("connection: waiting for connection...");
-                let Ok(stream) = connect(listen, peer).await else {
+                let Ok(stream) = connect(&listener, peer).await else {
                     error!("connection: connect failed");
                     tokio::time::sleep(reconnect_delay).await;
                     continue;
@@ -107,12 +120,7 @@ impl Peer for Connection {
     }
 }
 
-async fn connect(listen: SocketAddr, peer: SocketAddr) -> anyhow::Result<TcpStream> {
-    let socket = tokio::net::TcpSocket::new_v4()?;
-    socket.set_reuseaddr(true)?;
-    socket.bind(listen)?;
-    let listener = socket.listen(128)?;
-    info!("listening on {listen}");
+async fn connect(listener: &TcpListener, peer: SocketAddr) -> anyhow::Result<TcpStream> {
     tokio::select! {
         result = listener.accept() => {
             let (stream, addr) = result?;

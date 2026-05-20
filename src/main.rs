@@ -15,7 +15,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use clipboard::PlatformClipboard;
-use connection::Connection;
+use connection::{Connection, bind_listener};
 use sync::Sync;
 
 #[derive(Parser, Debug)]
@@ -51,11 +51,12 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let reconnect_delay = Duration::from_millis(cli.reconnect_delay_ms);
+    let listener = bind_listener(cli.listen)?;
 
     let peers = cli
         .peers
         .into_iter()
-        .map(|peer| Connection::open(cli.listen, peer, reconnect_delay))
+        .map(|peer| Connection::open(listener.clone(), peer, reconnect_delay))
         .collect();
 
     info!("initialized");
