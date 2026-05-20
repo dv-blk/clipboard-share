@@ -1,5 +1,6 @@
 package com.clipboardshare
 
+import java.io.DataInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -27,14 +28,14 @@ object PayloadDecoder {
     private const val VARIANT_HEARTBEAT = 2
 
     fun decode(stream: InputStream): String? {
-        // Read 4-byte big-endian frame length.
-        val lenBytes = stream.readNBytes(4)
-        if (lenBytes.size < 4) return null
-        val frameLen = ByteBuffer.wrap(lenBytes).order(ByteOrder.BIG_ENDIAN).int
+        val din = DataInputStream(stream)
+
+        // Read 4-byte big-endian frame length. readInt() throws EOFException on disconnect.
+        val frameLen = din.readInt()
         require(frameLen in 1..MAX_FRAME_BYTES) { "frame length out of range: $frameLen" }
 
-        val frame = stream.readNBytes(frameLen)
-        if (frame.size < frameLen) return null
+        val frame = ByteArray(frameLen)
+        din.readFully(frame)
 
         val buf = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
 
