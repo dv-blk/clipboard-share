@@ -42,7 +42,7 @@ Install the APK and start the service from the app. Configure the port to match 
 
 ## Running at startup
 
-### Linux (systemd user service)
+### Linux (systemd)
 
 Create `~/.config/systemd/user/clipboard-share.service`:
 
@@ -75,7 +75,9 @@ systemctl --user enable --now clipboard-share
    ```
 4. Click **Finish**
 
-The process runs silently in the background with no console window.
+### Android
+
+The service starts automatically on boot by default.
 
 ## Building
 
